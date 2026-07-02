@@ -1,0 +1,25 @@
+# Build
+*.o
+*.so
+*.out
+
+# Executables
+applications/alexnet_baseline
+applications/alexnet_pipeline
+applications/micro_sync_bench
+
+# Nsight
+*.sqlite
+*.nsys-rep
+*.qdrep
+
+# Logs
+applications/history/
+applications/history2/
+applications/history3/
+applications/multi_logs/
+applications/overhead_logs/
+applications/sync_logs/
+
+# Build directory
+bin/
