@@ -1,17 +1,4 @@
-// ============================================================
-// ResNet (EdgeNN 원본 모델 구조 그대로 유지)
-//   원본: ResNet.cu (EdgeNN 저장소)
-//   변경점: main 만 3,000 프레임 측정 + mean/p50/p95/p99 + FPS 로 교체
-//   forward_pass 는 원본 그대로 (수정 없음)
-//   offset 은 argv 로 지정 (기본 1.0 = GPU 100%)
-//
-// build:
-// nvcc -gencode arch=compute_72,code=sm_72 -O3 -std=c++17 --use_fast_math -Xcompiler "-pthread -Wall -O3 -fopenmp" -o resnet_edgenn resnet_edgenn.cu -lcudart -lgomp -lcuda
-//
-// run:
-// sudo jetson_clocks && ./resnet_edgenn         # 기본: offset=1.0, 3000프레임, warmup=100
-// sudo jetson_clocks && ./resnet_edgenn -o 0.5  # intra-layer split 50%
-// ============================================================
+
 #define USE_MNIST_LOADER
 #define MNIST_DOUBLE
 #include "../include/mnist.h"
@@ -29,9 +16,6 @@ using namespace std;
 static mnist_data *train_set, *test_set;
 static unsigned int Rtrain_cnt, Rtest_cnt;
 
-// ============================================================
-// [원본 그대로] 레이어 정의
-// ============================================================
 double iniStart = gettime();
 static RLayer l_input = RLayer(0, 0, 28 * 28, "input");
 static RLayer l_c1 = RLayer(5 * 5, 6, 24 * 24 * 6, "c1");
@@ -69,7 +53,6 @@ int main(int argc, const char **argv) {
         return 1;
     }
 
-    // ===== 측정 파라미터 파싱 =====
     double the_offset = 1.0;
     int NUM_FRAMES = 3000;
     int WARMUP = 100;
@@ -83,7 +66,6 @@ int main(int argc, const char **argv) {
     }
     offset = the_offset;
 
-    // ===== [원본 그대로] CUDA stream & memory attach =====
     cudaStream_t stream1;
     cudaStreamCreate(&stream1);
     cudaStreamAttachMemAsync(stream1, &Rinput_a, 0, cudaMemAttachHost);
@@ -109,11 +91,9 @@ int main(int argc, const char **argv) {
 
     loaddata();
 
-    // ===== Warmup =====
     for (int f = 0; f < WARMUP; ++f)
         forward_pass(test_set[f % Rtest_cnt].data);
 
-    // ===== Measure =====
     std::vector<double> ms;
     ms.reserve(NUM_FRAMES);
     double totalSt = gettime();
@@ -124,7 +104,6 @@ int main(int argc, const char **argv) {
     double elapsed = gettime() - totalSt;
     double fps = NUM_FRAMES / elapsed;
 
-    // ===== Statistics =====
     double sum = 0; for (double v : ms) sum += v;
     double mean = sum / ms.size();
     std::vector<double> s = ms;
@@ -148,10 +127,6 @@ int main(int argc, const char **argv) {
     return 0;
 }
 
-// ============================================================
-// [원본 그대로 — 한 줄도 수정하지 않음]
-// forward_pass: EdgeNN ResNet.cu 의 forward_pass 그대로
-// ============================================================
 static double forward_pass(double data[28][28]) {
     for (int i = 0; i < 28; ++i) {
         for (int j = 0; j < 28; ++j) {
@@ -231,3 +206,4 @@ static double forward_pass(double data[28][28]) {
 
     return ((double)(end - start));
 }
+

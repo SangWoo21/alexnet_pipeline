@@ -1,12 +1,4 @@
-// ============================================================
-// ResNet futex-based 3-stage pipeline
-//  S0 (CPU, core {0})     : input memcpy
-//  S1 (GPU launch, core {1}): c1 -> r -> c2 -> c3 -> add_res -> sigmoid
-//  S2 (CPU, core {2-5})   : FC 216 -> 10 (inline OMP)
-//
-// Synchronization: Linux futex (FUTEX_PRIVATE_FLAG)
-// Multi-buffer   : N_SLOTS = 6
-// ============================================================
+
 #define USE_MNIST_LOADER
 #define MNIST_DOUBLE
 #include "../include/mnist.h"
@@ -34,8 +26,8 @@ using namespace std;
 using Clock = chrono::steady_clock;
 
 static constexpr int N_SLOTS      = 6;
-static constexpr int INPUT_SIZE   = 28 * 28;      // MNIST 28x28
-static constexpr int FC_INPUT_SIZE = 6 * 6 * 6;   // sigmoid output = FC input
+static constexpr int INPUT_SIZE   = 28 * 28;
+static constexpr int FC_INPUT_SIZE = 6 * 6 * 6;
 static constexpr int FC_OUTPUT_SIZE = 10;
 
 static int NUM_FRAMES = 3000;
@@ -70,9 +62,6 @@ inline void get_cuda_size(const int N, int &grid, int &block) {
     grid = ceil(1.0 * N / block);
 }
 
-// ============================================================
-// futex wrappers
-// ============================================================
 static inline int futex_wait(atomic<int>* addr, int expected) {
     return syscall(SYS_futex, reinterpret_cast<int*>(addr),
                    FUTEX_WAIT | FUTEX_PRIVATE_FLAG, expected, nullptr, nullptr, 0);
@@ -88,16 +77,13 @@ static void set_affinity(initializer_list<int> cores) {
     pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
 }
 
-// ============================================================
-// Slot with atomic state (futex target)
-// ============================================================
 enum SlotState { EMPTY = 0, INPUT_READY = 1, CONV_DONE = 2 };
 
 struct Slot {
     atomic<int> state;
     int         fid;
-    double      input_buf[INPUT_SIZE];       // MNIST input 28x28 double
-    float       sigmoid_out[FC_INPUT_SIZE];  // c3 sigmoid output = FC input
+    double      input_buf[INPUT_SIZE];
+    float       sigmoid_out[FC_INPUT_SIZE];
 };
 static Slot g_slots[N_SLOTS];
 
@@ -135,9 +121,6 @@ struct Metrics {
     }
 };
 
-// ============================================================
-// GPU conv/residual/sigmoid execution
-// ============================================================
 static void run_gpu_only(cudaStream_t stream1) {
     offset = 1.0;
 
@@ -178,9 +161,6 @@ static void run_gpu_only(cudaStream_t stream1) {
     apply_sigmoid<<<128, 128, 0, stream1>>>(l_c3.preact, l_c3.output, l_c3.O);
 }
 
-// ============================================================
-// FC CPU: 216 -> 10 with inline OpenMP + softmax skipped (classification not needed for benchmark)
-// ============================================================
 static void run_fc_cpu_omp(float* fc_input) {
     memcpy(l_c3.output, fc_input, FC_INPUT_SIZE * sizeof(float));
     omp_set_num_threads(4);
@@ -192,13 +172,10 @@ static void run_fc_cpu_omp(float* fc_input) {
         const float* p = (float*)l_c3.output;
         for (int i = 0; i < FC_INPUT_SIZE; i++) sum += p[i] * w[i];
         l_f.preact[o] = sum;
-        l_f.output[o] = sum;   // no ReLU on final output layer
+        l_f.output[o] = sum;
     }
 }
 
-// ============================================================
-// Stage threads
-// ============================================================
 static void stage0_thread(Metrics* m) {
     set_affinity({0});
     m->ready.fetch_add(1);
@@ -210,7 +187,7 @@ static void stage0_thread(Metrics* m) {
         slot_wait_until(g_slots[s], EMPTY);
         auto tw1 = Clock::now();
         auto tr0 = Clock::now();
-        // MNIST input to slot buffer
+
         auto& img = test_set[fid % Rtest_cnt].data;
         for (int i = 0; i < 28; i++)
             for (int j = 0; j < 28; j++)
@@ -240,7 +217,6 @@ static void stage1_thread(Metrics* m, cudaStream_t stream1) {
         auto tw1 = Clock::now();
         auto tr0 = Clock::now();
 
-        // Slot input -> Rinput_a
         memcpy(Rinput_a, g_slots[s].input_buf, INPUT_SIZE * sizeof(double));
 
         cudaEventRecord(ev_s, stream1);
@@ -251,7 +227,6 @@ static void stage1_thread(Metrics* m, cudaStream_t stream1) {
         cudaEventElapsedTime(&gpu_ms, ev_s, ev_e);
         m->s1_pure_gpu.push_back(gpu_ms);
 
-        // Copy sigmoid output to slot
         memcpy(g_slots[s].sigmoid_out, l_c3.output, FC_INPUT_SIZE * sizeof(float));
 
         auto tr1 = Clock::now();
@@ -284,9 +259,6 @@ static void stage2_thread(Metrics* m) {
     }
 }
 
-// ============================================================
-// Statistics
-// ============================================================
 struct Stat { double mean, p50, p95, p99; };
 static Stat calc_stat(vector<double> v) {
     if (v.empty()) return {0,0,0,0};
@@ -330,7 +302,6 @@ int main(int argc, char** argv) {
 
     loaddata();
 
-    // Warmup
     for (int i = 0; i < WARMUP; i++) {
         auto& img = test_set[i % Rtest_cnt].data;
         for (int a = 0; a < 28; a++)
@@ -353,7 +324,6 @@ int main(int argc, char** argv) {
 
     t0.join(); t1.join(); t2.join();
 
-    // Trim warmup portion
     auto trim = [&](vector<double>& v) {
         int w = min((int)v.size(), WARMUP);
         v.erase(v.begin(), v.begin() + w);
@@ -397,3 +367,4 @@ int main(int argc, char** argv) {
     cudaStreamDestroy(stream1);
     return 0;
 }
+

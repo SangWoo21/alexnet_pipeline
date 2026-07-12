@@ -1,17 +1,4 @@
-// ============================================================
-// AlexNet (EdgeNN 원본 모델 구조 그대로 유지)
-//   원본: AlexNet.cu (EdgeNN 저장소)
-//   변경점: main 만 3,000 프레임 측정 + mean/p50/p95/p99 + FPS 로 교체
-//   forward_pass 는 원본 그대로 (수정 없음)
-//   offset 은 argv 로 지정 (기본 1.0 = GPU 100%)
-//
-// build:
-// nvcc -gencode arch=compute_72,code=sm_72 -O3 -std=c++17 --use_fast_math -Xcompiler "-pthread -Wall -O3 -fopenmp" -o alexnet_edgenn alexnet_edgenn.cu -lcudart -lgomp -lcuda
-//
-// run:
-// sudo jetson_clocks && ./alexnet_edgenn         # 기본: offset=1.0, 3000프레임, warmup=100
-// sudo jetson_clocks && ./alexnet_edgenn -o 0.5  # intra-layer split 50%
-// ============================================================
+
 #define USE_MNIST_LOADER
 #define MNIST_DOUBLE
 #include "../src/layer.cu"
@@ -28,9 +15,6 @@
 
 using namespace std;
 
-// ============================================================
-// [원본 그대로] 레이어 정의
-// ============================================================
 double iniStart = gettime();
 ALayer L_input = ALayer(0, 0, 227 * 227 * 3, "input");
 ALayer L_c1 = ALayer(11 * 11 * 3, 2 * 48, 2 * 55 * 55 * 48, "c1");
@@ -51,7 +35,6 @@ static double forward_pass(double data[227][227][3], cudaStream_t stream1);
 int main(int argc, const char **argv) {
     srand(time(NULL));
 
-    // ===== 측정 파라미터 파싱 =====
     double the_offset = 1.0;
     int NUM_FRAMES = 3000;
     int WARMUP = 100;
@@ -65,7 +48,6 @@ int main(int argc, const char **argv) {
     }
     offset = the_offset;
 
-    // ===== [원본 그대로] 입력 데이터 로드 =====
     double test_data[227][227][3] = {0.0};
     for (int i = 0; i < 227; i++) {
         for (int j = 0; j < 227; j++) {
@@ -75,7 +57,6 @@ int main(int argc, const char **argv) {
         }
     }
 
-    // ===== [원본 그대로] CUDA stream 및 memory attach =====
     cudaStream_t stream1;
     cudaStreamCreate(&stream1);
     cudaStreamAttachMemAsync(stream1, &Ainput_a, 0, cudaMemAttachHost);
@@ -117,10 +98,8 @@ int main(int argc, const char **argv) {
     cudaStreamAttachMemAsync(stream1, &Af3_a, 0, cudaMemAttachHost);
     cudaStreamAttachMemAsync(stream1, &Af3_z, 0, cudaMemAttachHost);
 
-    // ===== Warmup =====
     for (int i = 0; i < WARMUP; i++) forward_pass(test_data, stream1);
 
-    // ===== Measure =====
     std::vector<double> ms;
     ms.reserve(NUM_FRAMES);
     double totalSt = gettime();
@@ -131,7 +110,6 @@ int main(int argc, const char **argv) {
     double elapsed = gettime() - totalSt;
     double fps = NUM_FRAMES / elapsed;
 
-    // ===== Statistics =====
     double sum = 0; for (double v : ms) sum += v;
     double mean = sum / ms.size();
     std::vector<double> s = ms;
@@ -155,10 +133,6 @@ int main(int argc, const char **argv) {
     return 0;
 }
 
-// ============================================================
-// [원본 그대로 — 한 줄도 수정하지 않음]
-// forward_pass: EdgeNN AlexNet.cu 의 forward_pass 그대로
-// ============================================================
 static double forward_pass(double data[227][227][3], cudaStream_t stream1) {
     for (int i = 0; i < 227; ++i) {
         for (int j = 0; j < 227; ++j) {
@@ -279,3 +253,4 @@ static double forward_pass(double data[227][227][3], cudaStream_t stream1) {
     double end = gettime();
     return ((double)(end - start));
 }
+

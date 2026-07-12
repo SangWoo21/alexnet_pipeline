@@ -47,9 +47,6 @@ ALayer L_f2 = ALayer(1 * 4096, 2 * 2048, 4096 * 1, "f2");
 ALayer L_f3 = ALayer(1 * 4096, 1000, 1000, "f3");
 double iniEnd = gettime();
 
-// ============================================================
-// futex wrappers (FUTEX_PRIVATE_FLAG)
-// ============================================================
 static inline int futex_wait(atomic<int>* addr, int expected) {
     return syscall(SYS_futex, reinterpret_cast<int*>(addr),
                    FUTEX_WAIT | FUTEX_PRIVATE_FLAG, expected, nullptr, nullptr, 0);
@@ -59,16 +56,12 @@ static inline int futex_wake(atomic<int>* addr, int n) {
                    FUTEX_WAKE | FUTEX_PRIVATE_FLAG, n, nullptr, nullptr, 0);
 }
 
-// 코어 어피니티 헬퍼
 static void set_affinity(initializer_list<int> cores) {
     cpu_set_t cs; CPU_ZERO(&cs);
     for (int c : cores) CPU_SET(c, &cs);
     pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
 }
 
-// ============================================================
-// Slot: 상태값이 atomic<int> (futex 대상)
-// ============================================================
 enum SlotState { EMPTY = 0, INPUT_READY = 1, CONV_DONE = 2 };
 
 struct Slot {
@@ -86,7 +79,7 @@ static void slot_init() {
         memset(g_slots[s].pool3_buf, 0, sizeof(g_slots[s].pool3_buf));
     }
 }
-// fastpath: 상태가 이미 target 이면 syscall 없이 즉시 리턴.
+
 static void slot_wait_until(Slot& s, int target) {
     for (;;) {
         int cur = s.state.load(memory_order_acquire);
@@ -102,7 +95,7 @@ static void slot_set_state(Slot& s, int ns) {
 struct Metrics {
     vector<double> s0_wait, s0_run;
     vector<double> s1_wait, s1_run;
-    vector<double> s1_pure_conv;   // 순수 GPU conv 시간 (통제 변수)
+    vector<double> s1_pure_conv;
     vector<double> s2_wait, s2_run;
     chrono::time_point<Clock> t_start, t_end;
     atomic<int> ready{0};
@@ -145,14 +138,10 @@ static void run_conv_only_gpu(cudaStream_t stream1) {
         (float(*)[13][13])L_c5.output, (float(*)[6][6])L_p3.output);
 }
 
-// ============================================================
-// FC CPU: OpenMP 4스레드 + ReLU 인라인 (B3와 동일)
-// ============================================================
 static void run_fc_cpu_omp(float* pool3_data) {
     memcpy(L_p3.output, pool3_data, POOL3_SIZE*sizeof(float));
     omp_set_num_threads(4);
 
-    // FC1: 9216 → 4096
     #pragma omp parallel for schedule(static)
     for (int o = 0; o < L_f1.O; o++) {
         float sum = L_f1.bias[o];
@@ -162,7 +151,7 @@ static void run_fc_cpu_omp(float* pool3_data) {
         L_f1.preact[o] = sum;
         L_f1.output[o] = (sum > 0.f) ? sum : 0.f;
     }
-    // FC2: 4096 → 4096
+
     #pragma omp parallel for schedule(static)
     for (int o = 0; o < L_f2.O; o++) {
         float sum = L_f2.bias[o];
@@ -171,7 +160,7 @@ static void run_fc_cpu_omp(float* pool3_data) {
         L_f2.preact[o] = sum;
         L_f2.output[o] = (sum > 0.f) ? sum : 0.f;
     }
-    // FC3: 4096 → 1000
+
     #pragma omp parallel for schedule(static)
     for (int o = 0; o < L_f3.O; o++) {
         float sum = L_f3.bias[o];
@@ -182,9 +171,6 @@ static void run_fc_cpu_omp(float* pool3_data) {
     }
 }
 
-// ============================================================
-// Stage threads
-// ============================================================
 static void stage0_thread(Metrics* m, double data[227][227][3]) {
     set_affinity({0});
     m->ready.fetch_add(1);
@@ -211,7 +197,6 @@ static void stage0_thread(Metrics* m, double data[227][227][3]) {
 static void stage1_thread(Metrics* m, cudaStream_t stream1) {
     set_affinity({1});
 
-    // 순수 GPU conv 시간 측정용 cudaEvent
     cudaEvent_t ev_conv_s, ev_conv_e;
     cudaEventCreate(&ev_conv_s);
     cudaEventCreate(&ev_conv_e);
@@ -266,9 +251,6 @@ static void stage2_thread(Metrics* m) {
     }
 }
 
-// ============================================================
-// 통계 유틸리티
-// ============================================================
 struct Stat { double mean, p50, p95, p99; };
 static Stat calc_stat(vector<double> v) {
     if (v.empty()) return {0,0,0,0};
@@ -398,11 +380,9 @@ int main(int argc, char** argv) {
     double pipe_s = chrono::duration<double>(m.t_end - m.t_start).count();
     double pipe_fps = NUM_FRAMES / pipe_s;
 
-    // 출력 정확성 통제 변수
     double output_checksum = 0;
     for (int i = 0; i < L_f3.O; i++) output_checksum += (double)L_f3.output[i];
 
-    // 오버헤드 분해
     double cycle_ms     = max({s0r.mean, s1r.mean, s2r.mean});
     double useful_ms    = s1c.mean + s2r.mean;
     double overhead_ms  = cycle_ms - useful_ms;
@@ -430,7 +410,6 @@ int main(int argc, char** argv) {
     printf("Voluntary ctxt switches: %ld\n", vol1 - vol0);
     printf("Thread migrations      : %ld\n", mig1 - mig0);
 
-    // RSS (peak working set)
     {
         FILE* f = fopen("/proc/self/status", "r");
         long vmrss = -1, vmhwm = -1;
@@ -450,3 +429,4 @@ int main(int argc, char** argv) {
     cudaStreamDestroy(stream1);
     return 0;
 }
+

@@ -1,18 +1,4 @@
-// ============================================================
-// VGG-16 futex-based 3-stage pipeline
-//   S0 (CPU, core {0})      : input memcpy → slot
-//   S1 (GPU launch, core {1}): conv1_1 .. pool5 (13 conv + 5 pool, GPU)
-//   S2 (CPU, core {2-5})    : FC1→FC2→FC3→softmax (inline OMP 4)
-//
-//   동기화: Linux futex (FUTEX_PRIVATE_FLAG), 멀티버퍼 N_SLOTS = 6
-//   가중치: 랜덤 초기화 (seed 42) — baseline 과 동일
-//   지표: stage wait/run(mean/p95), Theory/Pipeline FPS, Eff, Pure GPU
-//
-// build:
-// nvcc -gencode arch=compute_72,code=sm_72 -O3 -std=c++17 --use_fast_math -Xcompiler "-pthread -Wall -O3 -fopenmp" -o vgg_futex vgg_futex.cu -lcudart -lpthread -lrt -lgomp -lcuda
-// run:
-// sudo jetson_clocks && ./vgg_futex -f 3000 -w 100
-// ============================================================
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -65,14 +51,11 @@ typedef enum { CONV_1 = 512 } ch;
 const int out = ch(CONV_1);
 
 static constexpr int N_SLOTS       = 6;
-static constexpr int INPUT_SIZE    = SIZE * SIZE * 3;   // 224*224*3
-static constexpr int POOL5_SIZE    = 7 * 7 * 512;       // 25088
+static constexpr int INPUT_SIZE    = SIZE * SIZE * 3;
+static constexpr int POOL5_SIZE    = 7 * 7 * 512;
 static int NUM_FRAMES = 3000;
 static int WARMUP     = 100;
 
-// ============================================================
-// 원본 VGG.cu GPU 커널 (수정 없이 그대로)
-// ============================================================
 __global__ void convolution(float *I, const float *__restrict__ M, float *P, float *b, int channels, int width,
                             int height, int numberofOutputChannels) {
     __shared__ float N_ds[B_y][B_x];
@@ -140,9 +123,6 @@ __global__ void maxpool(float *image, float *output, int number_of_channels, int
     }
 }
 
-// ============================================================
-// FC (CPU, OpenMP 4) — baseline 과 동일 구현
-// ============================================================
 static float *h_dense1, *h_dense2, *h_dense3;
 static float *h_bias1, *h_bias2, *h_bias3;
 static float *h_fc1o, *h_fc2o, *h_fc3o;
@@ -187,12 +167,9 @@ static void softmax_cpu(float *p, int n) {
     for (int i = 0; i < n; i++) p[i] /= s;
 }
 
-// ============================================================
-// GPU 가중치·버퍼 (1회 할당)
-// ============================================================
 static float *d_convW[13], *d_convB[13];
 static float *d_bufA, *d_bufB, *d_input;
-static float *h_input; // 프레임 소스 (S0 가 슬롯에 복사)
+static float *h_input;
 
 double gettime() {
     struct timeval t;
@@ -272,7 +249,6 @@ static inline void run_pool(float *in, float *outbuf, int channels, int w, int h
     maxpool<<<dimGrid, dimBlock, 0, st>>>(in, outbuf, channels, h, w, blockwidth);
 }
 
-// GPU 전체 conv/pool 체인 (VGG-16, 원본 흐름)
 static void run_gpu_chain(cudaStream_t st) {
     int w = SIZE, h = SIZE;
     run_conv(0, d_input, d_bufA, w, h, st);
@@ -297,12 +273,9 @@ static void run_gpu_chain(cudaStream_t st) {
     run_conv(11, d_bufA, d_bufB, w, h, st);
     run_conv(12, d_bufB, d_bufA, w, h, st);
     run_pool(d_bufA, d_bufB, 512, w, h, st);
-    // 결과: d_bufB 에 7*7*512
+
 }
 
-// ============================================================
-// futex wrappers + slot
-// ============================================================
 static inline int futex_wait(atomic<int>* addr, int expected) {
     return syscall(SYS_futex, reinterpret_cast<int*>(addr),
                    FUTEX_WAIT | FUTEX_PRIVATE_FLAG, expected, nullptr, nullptr, 0);
@@ -322,8 +295,8 @@ enum SlotState { EMPTY = 0, INPUT_READY = 1, CONV_DONE = 2 };
 struct Slot {
     atomic<int> state;
     int fid;
-    float *input_buf;   // 224*224*3 (host, 동적 할당)
-    float *pool5_buf;   // 7*7*512
+    float *input_buf;
+    float *pool5_buf;
 };
 static Slot g_slots[N_SLOTS];
 
@@ -362,9 +335,6 @@ struct Metrics {
     }
 };
 
-// ============================================================
-// Stage threads
-// ============================================================
 static void stage0_thread(Metrics* m) {
     set_affinity({0});
     m->ready.fetch_add(1);
@@ -401,7 +371,6 @@ static void stage1_thread(Metrics* m, cudaStream_t st) {
         auto tw1 = Clock::now();
         auto tr0 = Clock::now();
 
-        // slot input → device
         cudaMemcpyAsync(d_input, g_slots[s].input_buf, (size_t)INPUT_SIZE * sizeof(float),
                         cudaMemcpyHostToDevice, st);
 
@@ -413,7 +382,6 @@ static void stage1_thread(Metrics* m, cudaStream_t st) {
         cudaEventElapsedTime(&gpu_ms, ev_s, ev_e);
         m->s1_pure_gpu.push_back(gpu_ms);
 
-        // pool5 → slot (host)
         cudaMemcpyAsync(g_slots[s].pool5_buf, d_bufB, (size_t)POOL5_SIZE * sizeof(float),
                         cudaMemcpyDeviceToHost, st);
         cudaStreamSynchronize(st);
@@ -452,7 +420,6 @@ static void stage2_thread(Metrics* m) {
     }
 }
 
-// ============================================================
 struct Stat { double mean, p50, p95, p99; };
 static Stat calc_stat(vector<double> v) {
     if (v.empty()) return {0,0,0,0};
@@ -481,7 +448,6 @@ int main(int argc, char** argv) {
     init_all();
     printf("[init] done in %.2f s\n", gettime() - t0);
 
-    // Warmup (순차 실행으로 GPU/캐시 예열)
     omp_set_num_threads(4);
     for (int i = 0; i < WARMUP; i++) {
         cudaMemcpy(d_input, h_input, (size_t)INPUT_SIZE * sizeof(float), cudaMemcpyHostToDevice);
@@ -540,3 +506,4 @@ int main(int argc, char** argv) {
     cudaStreamDestroy(st);
     return 0;
 }
+
