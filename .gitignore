@@ -1,0 +1,18 @@
+# 실행 파일
+alexnet_baseline
+alexnet_futex
+resnet_baseline
+resnet_futex
+vgg_baseline
+vgg_futex
+*.o
+*.out
+
+# EdgeNN 원본 (별도)
+EdgeNN/
+data/
+
+# 에디터
+.vscode/
+*.swp
+.DS_Store
